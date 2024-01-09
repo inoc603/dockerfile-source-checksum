@@ -2,9 +2,12 @@ package main
 
 import (
 	"bytes"
+	"crypto/md5"
 	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"hash"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -30,6 +33,20 @@ func main() {
 	newCmdRoot().Execute()
 }
 
+type LoggingHash struct {
+	hash.Hash
+}
+
+func (l *LoggingHash) Write(p []byte) (n int, err error) {
+	checksum := md5.Sum(p)
+	logger.Debug("add to hash", "md5", hex.EncodeToString(checksum[:]))
+	return l.Hash.Write(p)
+}
+
+func newHashWithLog(h hash.Hash) *LoggingHash {
+	return &LoggingHash{Hash: h}
+}
+
 func newCmdRoot() *cobra.Command {
 	cmdRoot := &cobra.Command{
 		Use: "docker-source-checksum",
@@ -50,6 +67,7 @@ func newCmdRoot() *cobra.Command {
 		nil,
 		"--label for the docker build command",
 	)
+	cmdRoot.Flags().String("hash", "sha1", "hash algorithm to use")
 	cmdRoot.Flags().StringP("file", "f", "Dockerfile", "path to dockerfile")
 	cmdRoot.Flags().Bool("debug", false, "print debug logs")
 	return cmdRoot
@@ -60,7 +78,9 @@ func handlerRoot(cmd *cobra.Command, args []string) {
 
 	if viper.GetBool("debug") {
 		logger = slog.New(slog.NewTextHandler(
-			os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug},
+			os.Stderr, &slog.HandlerOptions{
+				Level: slog.LevelDebug,
+			},
 		))
 	}
 
@@ -74,7 +94,22 @@ func handlerRoot(cmd *cobra.Command, args []string) {
 
 	workdir := os.DirFS(args[0])
 
-	h := sha1.New()
+	var h hash.Hash
+
+	switch algo := viper.GetString("hash"); algo {
+	case "sha1":
+		h = sha1.New()
+	case "md5":
+		h = md5.New()
+	case "sha256":
+		h = sha256.New()
+	default:
+		panic(fmt.Sprintf("unknown hash algorithm %s", algo))
+	}
+
+	if viper.GetBool("debug") {
+		h = newHashWithLog(h)
+	}
 
 	// Add dockerfile to checksum
 	logger.Debug(
@@ -94,108 +129,101 @@ func handlerRoot(cmd *cobra.Command, args []string) {
 
 		for _, file := range must(fs.Glob(workdir, path)) {
 			must(io.WriteString(h, file))
-			must(h.Write(must(pathSha(workdir, file))))
+			must0(pathSha(workdir, file, h))
 		}
 	}
 
-	// Add build args to checksum
-	buildArgsKeys := maps.Keys(buildArgs)
-	sort.Strings(buildArgsKeys)
-	for _, key := range buildArgsKeys {
-		logger.Debug("add build arg to checksum", key, buildArgs[key])
-		must(io.WriteString(h, key))
-		must(io.WriteString(h, buildArgs[key]))
-	}
+	addMapToHash(h, buildArgs)
 
-	// Add platforms to checksum
-	platforms := viper.GetStringSlice("platform")
-	sort.Strings(platforms)
-	for _, platform := range platforms {
-		logger.Debug("add platform to checksum", "platform", platform)
-		must(io.WriteString(h, platform))
-	}
+	addSliceToHash(h, viper.GetStringSlice("platform"))
 
-	labels := viper.GetStringMapString("label")
-	labelKeys := maps.Keys(labels)
-	sort.Strings(labelKeys)
-	for _, key := range labelKeys {
-		logger.Debug("add label to checksum", key, labels[key])
-		must(io.WriteString(h, key))
-		must(io.WriteString(h, labels[key]))
-	}
+	addMapToHash(h, viper.GetStringMapString("label"))
 
 	fmt.Fprintf(cmd.OutOrStdout(), "%x", h.Sum(nil))
 }
 
-func pathSha(fsys fs.FS, path string) ([]byte, error) {
+func addMapToHash(h hash.Hash, m map[string]string) {
+	keys := maps.Keys(m)
+	sort.Strings(keys)
+	for _, key := range keys {
+		must(io.WriteString(h, key))
+		must(io.WriteString(h, m[key]))
+	}
+}
+
+func addSliceToHash(h hash.Hash, s []string) {
+	sort.Strings(s)
+	for _, platform := range s {
+		must(io.WriteString(h, platform))
+	}
+}
+
+func pathSha(fsys fs.FS, path string, h hash.Hash) error {
 	stat, err := fs.Stat(fsys, path)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	if !stat.IsDir() {
-		return fileSha(fsys, path)
+		return fileSha(fsys, path, h)
 	}
 
-	return dirSha(fsys, path)
+	return dirSha(fsys, path, h)
 }
 
-func dirSha(fsys fs.FS, path string) ([]byte, error) {
-	h := sha1.New()
-
+func dirSha(fsys fs.FS, path string, h hash.Hash) error {
 	children, err := fs.ReadDir(fsys, path)
 	if err != nil {
-		return nil, fmt.Errorf("fs.ReadDir: %w", err)
+		return fmt.Errorf("fs.ReadDir: %w", err)
 	}
 
 	for _, child := range children {
 		childPath := filepath.Join(path, child.Name())
 		io.WriteString(h, childPath)
 
-		childHash, err := pathSha(fsys, childPath)
+		err := pathSha(fsys, childPath, h)
 		if err != nil {
-			return nil, fmt.Errorf(
+			return fmt.Errorf(
 				"calculating hash for %s: %w", childPath, err,
 			)
 		}
-
-		h.Write(childHash)
 	}
 
-	checksum := h.Sum(nil)
 	logger.Debug(
 		"add path to checksum",
 		"path", path,
-		"checksum", hex.EncodeToString(checksum),
 	)
-	return checksum, nil
+	return nil
 }
 
-func fileSha(fsys fs.FS, path string) ([]byte, error) {
+func fileSha(fsys fs.FS, path string, h hash.Hash) error {
 	f, err := fsys.Open(path)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer f.Close()
 
-	h := sha1.New()
 	if _, err := io.Copy(h, f); err != nil {
-		return nil, err
+		return err
 	}
 
-	checksum := h.Sum(nil)
 	logger.Debug(
 		"add path to checksum",
 		"path", path,
-		"checksum", hex.EncodeToString(checksum),
 	)
-	return checksum, nil
+
+	return nil
 }
 
-func pathsFromDockerfile(res *parser.Result, buildArgs map[string]string) []string {
+func pathsFromDockerfile(
+	res *parser.Result,
+	buildArgs map[string]string,
+) []string {
 	shlex := shell.NewLex(res.EscapeToken)
 
-	var expandBuildArgs instructions.SingleWordExpander = func(key string) (string, error) {
+	var expandBuildArgs instructions.SingleWordExpander = func(
+		key string,
+	) (string, error) {
 		return shlex.ProcessWordWithMap(key, buildArgs)
 	}
 
