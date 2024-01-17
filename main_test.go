@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/inoc603/dockerfile-source-checksum/pkg/checksum"
 	"github.com/moby/buildkit/frontend/dockerfile/parser"
 	"github.com/stretchr/testify/require"
 )
@@ -26,7 +27,7 @@ func TestPathsFromDockerfile(t *testing.T) {
 	content := must(os.ReadFile("testdata/Dockerfile"))
 	res := must(parser.Parse(bytes.NewBuffer(content)))
 
-	paths := pathsFromDockerfile(res, map[string]string{
+	paths := checksum.PathsFromDockerfile(res, map[string]string{
 		"ARG1": "b",
 	})
 
@@ -69,7 +70,7 @@ func TestChecksum(t *testing.T) {
 }
 
 func generateRandomFile(paths ...string) string {
-	tmpDir := must(os.MkdirTemp(os.TempDir(), "docker-source-checksum"))
+	tmpDir := must(os.MkdirTemp(os.TempDir(), "dockerfile-source-checksum"))
 	for _, path := range paths {
 		path = filepath.Join(tmpDir, path)
 		must0(os.MkdirAll(filepath.Dir(path), 0o755))
