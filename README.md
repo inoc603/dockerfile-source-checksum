@@ -21,17 +21,17 @@ Inspired by [github.com/dpc/docker-source-checksum](https://github.com/dpc/docke
 > TODO: add binary release
 
 ```sh
-go install github.com/inoc603/docker-source-checksum@latest
+go install github.com/inoc603/dockerfile-source-checksum@latest
 ```
 
 ## Usage
 
 ```sh
-docker-source-checksum -f Dockerfile .
+dockerfile-source-checksum -f Dockerfile .
 ```
 
 ```sh
-docker-source-checksum \
+dockerfile-source-checksum \
     -f Dockerfile \
     --build-arg key1=value1 \
     --build-arg key2=value2 \
