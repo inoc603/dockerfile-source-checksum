@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -92,13 +93,18 @@ func CalculateDockerfileChecksum(c Config) (string, error) {
 
 	// Add copied source to checksum
 	paths := PathsFromDockerfile(res, c.BuildArgs)
-	for _, path := range paths {
-		c.logger.Debug("calculate checksum for path", "path", path)
-		if strings.HasPrefix(path, "./") {
-			path = must(filepath.Rel(".", path))
+	for _, source := range paths {
+		c.logger.Debug("calculate checksum for path", "path", source)
+		pattern := normalizeSourcePath(source)
+		matches, err := fs.Glob(workdir, pattern)
+		if err != nil {
+			return "", errors.Wrapf(err, "glob source %q", source)
+		}
+		if len(matches) == 0 {
+			c.logger.Warn("source matched no local files; checksum omits this source", "path", source)
 		}
 
-		for _, file := range must(fs.Glob(workdir, path)) {
+		for _, file := range matches {
 			must(io.WriteString(h, file))
 			must0(pathSha(workdir, file, h))
 		}
@@ -111,6 +117,17 @@ func CalculateDockerfileChecksum(c Config) (string, error) {
 	addMapToHash(h, c.Labels)
 
 	return fmt.Sprintf("%x", h.Sum(nil)), nil
+}
+
+// normalizeSourcePath makes Docker context paths valid io/fs glob patterns.
+// Docker ignores leading slashes, parent traversal and trailing slashes.
+// Use slash-based cleaning so wildcard syntax is preserved on every platform.
+func normalizeSourcePath(source string) string {
+	pattern := strings.TrimPrefix(path.Clean("/"+source), "/")
+	if pattern == "" {
+		return "."
+	}
+	return pattern
 }
 
 func addMapToHash(h hash.Hash, m map[string]string) {
