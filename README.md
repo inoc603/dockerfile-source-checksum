@@ -31,6 +31,14 @@ also trigger an unmatched-source warning.
 Normalizing previously omitted paths changes their checksums. Existing valid
 paths retain their source contribution. Malformed glob patterns return an error.
 
+Variable expansion follows the pinned BuildKit version's ARG/ENV stage semantics.
+Global ARG values require an ARG declaration inside a stage. Unrelated stages
+start with separate variables; stages derived from named stages inherit their
+variables. Supplied build arguments are hashed without modification. Corrected
+variable expansion and argument hashing can change existing checksums.
+Environment values from external base images and automatic platform arguments
+are not resolved.
+
 Inspired by [github.com/dpc/docker-source-checksum](https://github.com/dpc/docker-source-checksum). The major difference is that this tool supports directory from `RUN --mount=type=bind` and handles variable expansion in dockerfile.
 
 ## Install

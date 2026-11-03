@@ -201,32 +201,59 @@ func PathsFromDockerfile(
 ) []string {
 	shlex := shell.NewLex(res.EscapeToken)
 
-	var expandBuildArgs instructions.SingleWordExpander = func(
-		key string,
-	) (string, error) {
-		return shlex.ProcessWordWithMap(key, buildArgs)
-	}
-
 	stages, argCommands, err := instructions.Parse(res.AST)
 	must0(err)
 
+	globalArgs := make(map[string]string)
 	for _, argCmd := range argCommands {
 		for _, arg := range argCmd.Args {
-			if _, ok := buildArgs[arg.Key]; !ok && arg.Value != nil {
-				buildArgs[arg.Key] = arg.ValueString()
+			if value, ok := buildArgs[arg.Key]; ok {
+				globalArgs[arg.Key] = value
+			} else if arg.Value != nil {
+				globalArgs[arg.Key] = must(shlex.ProcessWordWithMap(*arg.Value, globalArgs))
+			} else {
+				globalArgs[arg.Key] = ""
 			}
 		}
 	}
 
+	// ENV persists in derived stages; ARG only updates the expansion environment.
+	type stageState struct {
+		values map[string]string
+		env    map[string]string
+	}
+	states := make(map[string]stageState)
 	var paths []string
 
 	for _, stage := range stages {
+		state := stageState{values: make(map[string]string), env: make(map[string]string)}
+		base := must(shlex.ProcessWordWithMap(stage.BaseName, globalArgs))
+		if parent, ok := states[strings.ToLower(base)]; ok {
+			state.values = maps.Clone(parent.values)
+			state.env = maps.Clone(parent.env)
+			for key, value := range state.env {
+				state.values[key] = value
+			}
+		}
+		expand := func(word string) (string, error) {
+			return shlex.ProcessWordWithMap(word, state.values)
+		}
 		for _, iCmd := range stage.Commands {
 			if expandable, ok := iCmd.(instructions.SupportsSingleWordExpansion); ok {
-				must0(expandable.Expand(expandBuildArgs))
+				must0(expandable.Expand(expand))
 			}
 
 			switch cmd := iCmd.(type) {
+			case *instructions.ArgCommand:
+				for _, arg := range cmd.Args {
+					if value, ok := buildArgs[arg.Key]; ok {
+						state.values[arg.Key] = value
+					} else if arg.Value != nil {
+						state.values[arg.Key] = *arg.Value
+					} else if value, ok := globalArgs[arg.Key]; ok {
+						state.values[arg.Key] = value
+					}
+				}
 			case *instructions.CopyCommand:
 				if cmd.From == "" {
 					paths = append(paths, cmd.SourcePaths...)
@@ -235,7 +262,8 @@ func PathsFromDockerfile(
 				paths = append(paths, cmd.SourcePaths...)
 			case *instructions.EnvCommand:
 				for _, env := range cmd.Env {
-					buildArgs[env.Key] = env.Value
+					state.values[env.Key] = env.Value
+					state.env[env.Key] = env.Value
 				}
 			case *instructions.RunCommand:
 				for _, mount := range instructions.GetMounts(cmd) {
@@ -245,6 +273,9 @@ func PathsFromDockerfile(
 					}
 				}
 			}
+		}
+		if stage.Name != "" {
+			states[strings.ToLower(stage.Name)] = state
 		}
 	}
 

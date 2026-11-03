@@ -9,6 +9,7 @@ RUN --mount=type=bind,source=./dist,target=/app/dist \
 ###############################################################################
 
 FROM alpine
+ARG ARG1
 
 WORKDIR /app
 
